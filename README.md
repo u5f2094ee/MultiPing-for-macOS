@@ -8,7 +8,7 @@ MultiPing is a lightweight macOS network monitoring utility for pinging many tar
 
 ## Highlights
 
-- **Bulk ICMP probing** with a bundled `fping` engine instead of launching one `ping` process per target.
+- **Bulk ICMP probing** with a bundled `fping` engine.
 - **IPv4, IPv6, and domain-name targets** can be monitored in the same session.
 - **Per-target notes** make large target lists easier to read and export.
 - **List and Grid layouts** can be switched while monitoring is still running.
