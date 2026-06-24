@@ -1,42 +1,9 @@
 import Foundation
 import Combine
-import SwiftUI // Needed for Process
 
-// MARK: - Concurrency Limiter Actor (Unchanged)
-actor PingConcurrencyLimiter {
-    private let limit: Int
-    private var currentCount: Int = 0
-
-    init(limit: Int) {
-        self.limit = max(1, limit) // Ensure limit is at least 1
-    }
-
-    func acquireSlot() async {
-        while true {
-            if currentCount < limit {
-                currentCount += 1
-                return // Slot acquired
-            }
-            await Task.yield() // Yield if limit reached
-        }
-    }
-
-    func releaseSlot() {
-        if currentCount > 0 {
-            currentCount -= 1
-        }
-    }
-}
-
-// MARK: - Custom Timeout Error for clarity (Unchanged)
-enum TimeoutError: Error {
-    case operationTimedOut
-}
-
-// MARK: - Ping Manager Class
 class PingManager: ObservableObject {
-    // MARK: - Published Properties (Unchanged)
     private let userDefaultsIPKey = "lastIPInput"
+
     @Published var ipInput: String {
         didSet { UserDefaults.standard.set(ipInput, forKey: userDefaultsIPKey) }
     }
@@ -48,63 +15,60 @@ class PingManager: ObservableObject {
     @Published var pingStatus: String = "Stopped"
     @Published var reachableCount: Int = 0
     @Published var failedCount: Int = 0
+    @Published var engineErrorMessage: String? = nil
 
-    // MARK: - Private Properties (Unchanged)
     private var pingTaskGroup: Task<Void, Never>? = nil
     private var currentTimeout: String = "2000"
-    private var currentInterval: String = "10"
+    private var currentInterval: String = "3"
     private var currentSize: String = "32"
-    private var calculatedMaxJitterNano: Int64 = 1_000_000_000
-    private let limiter = PingConcurrencyLimiter(limit: 80) // Concurrency limit
+    private var currentDscp: String = "0"
+    private let fpingEngine = FpingEngine()
+    private let maxEngineRestartAttempts = 2
+    private let engineRestartDelayNs: UInt64 = 500_000_000
 
-    // MARK: - Initialization (Unchanged)
     init() {
         self.ipInput = UserDefaults.standard.string(forKey: userDefaultsIPKey) ?? ""
-        // print("PingManager init") // For debugging
         Task { @MainActor in self.updateTotalCounts() }
     }
 
-    // MARK: - Deinitializer (Unchanged)
     deinit {
         print("PingManager deinit called. Current status: \(pingStatus)")
-        // Ensure the main task group is cancelled when PingManager is deallocated.
-        // This is a safety net. stopPingTasks should ideally handle this earlier
-        // if called from onDisappear or applicationWillTerminate.
         pingTaskGroup?.cancel()
-        pingTaskGroup = nil // Ensure it's nilled out
+        pingTaskGroup = nil
     }
 
-    // MARK: - Action Methods
-    // startPingTasks and togglePause remain unchanged
-    func startPingTasks(timeout: String, interval: String, size: String) {
+    func startPingTasks(timeout: String, interval: String, size: String, dscp: String) {
         guard !pingStarted else { return }
+
         let isResuming = (pingStatus == "Paused")
-        self.currentTimeout = timeout; self.currentInterval = interval; self.currentSize = size
-        pingStarted = true; isPaused = false; pingStatus = "Pinging..."
-        let targetCount = results.count
-        self.calculatedMaxJitterNano = targetCount > 0 ? (Int64(targetCount) * 14 * 1_000_000) : 3_000_000_000
-        if !isResuming {
-            Task {
-                await MainActor.run {
-                    for result in results { result.resetStats(initialStatus: "Pinging...") }
-                    self.updateTotalCounts()
+        self.currentTimeout = timeout
+        self.currentInterval = interval
+        self.currentSize = size
+        self.currentDscp = dscp
+
+        pingStarted = true
+        isPaused = false
+        pingStatus = "Pinging..."
+        engineErrorMessage = nil
+
+        Task { @MainActor in
+            if !isResuming {
+                for result in results {
+                    result.resetStats(initialStatus: "Pinging...")
+                }
+                self.updateTotalCounts()
+            } else {
+                for result in results where result.responseTime.lowercased() == "paused" {
+                    result.responseTime = "Pinging..."
                 }
             }
-        } else {
-             Task {
-                 await MainActor.run {
-                     for result in results where result.responseTime.lowercased() == "paused" {
-                         result.responseTime = "Pinging..."
-                     }
-                 }
-             }
         }
+
         pingTaskGroup?.cancel()
-        pingTaskGroup = nil // Explicitly nil before creating new
         pingTaskGroup = Task {
             await runPingLoop()
             if !Task.isCancelled {
-                 await MainActor.run {
+                await MainActor.run {
                     if self.pingStarted && !self.isPaused {
                         self.pingStarted = false
                         self.pingStatus = "Completed"
@@ -125,59 +89,52 @@ class PingManager: ObservableObject {
 
     func togglePause() {
         guard (pingStatus == "Pinging..." && !isPaused) || (pingStatus == "Paused" && isPaused) else { return }
+
         if !isPaused {
             isPaused = true
-            pingStarted = false // Important: mark as not "pingStarted" when paused.
+            pingStarted = false
             pingStatus = "Paused"
             pingTaskGroup?.cancel()
             pingTaskGroup = nil
-            Task { [weak self] in
-                await MainActor.run {
-                    guard let self = self else { return }
-                    for result in self.results where result.responseTime.lowercased() == "pinging..." {
-                        result.responseTime = "Paused"
-                    }
-                    self.updateTotalCounts()
+
+            Task { @MainActor [weak self] in
+                guard let self = self else { return }
+                for result in self.results where result.responseTime.lowercased() == "pinging..." {
+                    result.responseTime = "Paused"
                 }
+                self.updateTotalCounts()
             }
         } else {
-            // isPaused was true, so we are resuming
-            // isPaused will be set to false by startPingTasks
-            startPingTasks(timeout: currentTimeout, interval: currentInterval, size: currentSize)
+            startPingTasks(timeout: currentTimeout, interval: currentInterval, size: currentSize, dscp: currentDscp)
         }
     }
 
-    // MARK: - stopPingTasks (Unchanged from previous version in this artifact)
     func stopPingTasks(clearResults: Bool) {
-        // print("stopPingTasks called from PingManager, clearResults: \(clearResults)")
-        
-        let previousStatus = self.pingStatus // Capture status before changes
+        let previousStatus = self.pingStatus
         let wasEffectivelyRunning = pingStarted || previousStatus == "Pinging..." || previousStatus == "Paused"
 
-        // 1. Immediately cancel any ongoing ping task group.
-        // This is crucial to stop new Process objects from being created or managed.
         pingTaskGroup?.cancel()
         pingTaskGroup = nil
-
-        // 2. Update state flags synchronously.
         pingStarted = false
         isPaused = false
-        
+
         let newFinalStatus = clearResults ? "Cleared" : "Stopped"
 
-        // 3. Asynchronously update UI-related properties and individual results on the main actor.
         Task { @MainActor [weak self] in
             guard let self = self else { return }
 
             self.pingStatus = newFinalStatus
+            if clearResults {
+                self.engineErrorMessage = nil
+            }
 
             if wasEffectivelyRunning || clearResults {
                 for result in self.results {
                     let currentItemStatus = result.responseTime.lowercased()
-                    
+
                     if clearResults ||
-                       ["pinging...", "paused", "pending"].contains(currentItemStatus) ||
-                       (newFinalStatus == "Stopped" && wasEffectivelyRunning) {
+                        ["pinging...", "paused", "pending", "restarting engine..."].contains(currentItemStatus) ||
+                        (newFinalStatus == "Stopped" && wasEffectivelyRunning) {
                         result.responseTime = newFinalStatus
                         result.isSuccessful = false
                     }
@@ -191,60 +148,73 @@ class PingManager: ObservableObject {
         }
     }
 
+    @MainActor func prepareForAppTermination(clearResults: Bool) {
+        pingTaskGroup?.cancel()
+        pingTaskGroup = nil
+        pingStarted = false
+        isPaused = false
+        pingStatus = clearResults ? "Cleared" : "Stopped"
+        if clearResults {
+            engineErrorMessage = nil
+            for result in results {
+                result.resetStats(initialStatus: "Cleared")
+            }
+        } else {
+            for result in results where ["pinging...", "paused", "pending", "restarting engine..."].contains(result.responseTime.lowercased()) {
+                result.responseTime = "Stopped"
+                result.isSuccessful = false
+                result.clearCurrentLatency()
+            }
+        }
+        updateTotalCounts()
+    }
 
-    // MARK: - Internal Pinging Logic (Unchanged from user's provided code)
     private func runPingLoop() async {
-        let minStaggerDelay: UInt64 = 1_000_000, maxStaggerDelay: UInt64 = 30_000_000
-        let minIntervalJitter: Int64 = -calculatedMaxJitterNano / 2, maxIntervalJitter: Int64 = calculatedMaxJitterNano
-        
+        var consecutiveEngineRestartAttempts = 0
+
         while !Task.isCancelled && pingStarted && !isPaused {
             let roundStartTime = Date()
-            await withTaskGroup(of: Void.self) { roundGroup in
-                for currentTargetResult in results {
-                    guard !Task.isCancelled && pingStarted && !isPaused else { break }
-                    guard results.contains(where: { $0.id == currentTargetResult.id }) else { continue }
-                    
-                    do { try await Task.sleep(nanoseconds: UInt64.random(in: minStaggerDelay...maxStaggerDelay)) }
-                    catch { break }
-
-                    guard !Task.isCancelled && pingStarted && !isPaused else { break }
-
-                    roundGroup.addTask { [weak self] in
-                        guard let self = self else { return }
-
-                        let targetID = currentTargetResult.id
-                        await self.limiter.acquireSlot()
-                        defer { Task { await self.limiter.releaseSlot() } }
-
-                        guard !Task.isCancelled && self.pingStarted && !self.isPaused else { return }
-                        
-                        let response = await self.performPing(for: currentTargetResult, timeout: self.currentTimeout, size: self.currentSize)
-                        
-                        guard !Task.isCancelled && self.pingStarted && !self.isPaused else { return }
-
-                        let currentSuccess = !["timeout", "error", "no output", "failed", "host unknown", "invalid target", "network down", "cancelled", "no route"].contains { response.lowercased().contains($0) } && !response.isEmpty
-                        
-                        await MainActor.run {
-                            guard self.pingStarted, !self.isPaused, let resultToUpdate = self.results.first(where: { $0.id == targetID }) else { return }
-                            resultToUpdate.responseTime = response; resultToUpdate.isSuccessful = currentSuccess
-                            if currentSuccess { resultToUpdate.successCount += 1 }
-                            else { if !["paused", "stopped", "cancelled", "pinging...", "pending", "cleared"].contains(response.lowercased()) { resultToUpdate.failureCount += 1 } }
-                            let totalPings = resultToUpdate.successCount + resultToUpdate.failureCount
-                            resultToUpdate.failureRate = totalPings > 0 ? (Double(resultToUpdate.failureCount) / Double(totalPings)) * 100.0 : 0.0
-                            self.updateTotalCounts()
-                        }
-                    }
-                }
-                await roundGroup.waitForAll()
+            let timeoutMs = Int(currentTimeout) ?? 2000
+            let packetSize = Int(currentSize) ?? 32
+            let dscpValue = Int(currentDscp) ?? 0
+            let roundTargets = results.map {
+                FpingTarget(id: $0.id, value: $0.targetValue, type: $0.targetType)
             }
+
+            do {
+                let roundResults = try await fpingEngine.probe(
+                    targets: roundTargets,
+                    timeoutMs: timeoutMs,
+                    packetSize: packetSize,
+                    dscp: dscpValue
+                )
+
+                guard !Task.isCancelled && pingStarted && !isPaused else { break }
+                await apply(roundResults: roundResults)
+                consecutiveEngineRestartAttempts = 0
+            } catch is CancellationError {
+                break
+            } catch {
+                if shouldRestartEngine(after: error, currentAttemptCount: consecutiveEngineRestartAttempts) {
+                    consecutiveEngineRestartAttempts += 1
+                    await markEngineRestartAttempt(error, attempt: consecutiveEngineRestartAttempts)
+                    do {
+                        try await Task.sleep(nanoseconds: engineRestartDelayNs)
+                    } catch {
+                        break
+                    }
+                    continue
+                }
+
+                await handleEngineFailure(error)
+                break
+            }
+
             guard !Task.isCancelled && pingStarted && !isPaused else { break }
 
-            let roundEndTime = Date(); let roundDuration = roundEndTime.timeIntervalSince(roundStartTime)
+            let roundDuration = Date().timeIntervalSince(roundStartTime)
             let baseIntervalSeconds = TimeInterval(Int(self.currentInterval) ?? 5)
-            let remainingWaitTime = max(0.01, baseIntervalSeconds - roundDuration)
-            let randomJitterNano = Int64.random(in: minIntervalJitter...maxIntervalJitter)
-            let jitterSeconds = TimeInterval(randomJitterNano) / 1_000_000_000.0
-            let sleepDuration = max(0.01, remainingWaitTime + jitterSeconds)
+            let sleepDuration = max(0.01, baseIntervalSeconds - roundDuration)
 
             do {
                 try await Task.sleep(nanoseconds: UInt64(sleepDuration * 1_000_000_000.0))
@@ -254,156 +224,82 @@ class PingManager: ObservableObject {
         }
     }
 
-    // MARK: - Timeout Helper (Unchanged from user's provided code)
-    private func withTimeout<T: Sendable>(
-        nanoseconds: UInt64,
-        operation: @escaping @Sendable () async throws -> T
-    ) async throws -> T {
-        return try await withThrowingTaskGroup(of: T.self) { group in
-            group.addTask {
-                return try await operation()
+    @MainActor private func apply(roundResults: [UUID: FpingProbeResult]) {
+        guard pingStarted, !isPaused else { return }
+
+        engineErrorMessage = nil
+
+        for result in results {
+            guard let probeResult = roundResults[result.id] else { continue }
+
+            result.responseTime = probeResult.responseTime
+            result.isSuccessful = probeResult.isSuccessful
+
+            if probeResult.isSuccessful {
+                result.successCount += 1
+                if let latencyMilliseconds = probeResult.latencyMilliseconds {
+                    result.recordLatency(milliseconds: latencyMilliseconds)
+                } else {
+                    result.clearCurrentLatency()
+                }
+            } else if !["paused", "stopped", "cancelled", "pinging...", "pending", "cleared"].contains(probeResult.responseTime.lowercased()) {
+                result.clearCurrentLatency()
+                result.failureCount += 1
+            } else {
+                result.clearCurrentLatency()
             }
-            group.addTask {
-                try await Task.sleep(nanoseconds: nanoseconds)
-                throw TimeoutError.operationTimedOut
-            }
-            guard let result = try await group.next() else {
-                throw NSError(domain: "PingManagerError", code: -1, userInfo: [NSLocalizedDescriptionKey: "Task group completed without a result."])
-            }
-            group.cancelAll()
-            return result
+
+            let totalPings = result.successCount + result.failureCount
+            result.failureRate = totalPings > 0 ? (Double(result.failureCount) / Double(totalPings)) * 100.0 : 0.0
         }
+
+        updateTotalCounts()
     }
 
-    // MARK: - Ping Execution and Parsing (MODIFIED with Task.yield)
-    private func performPing(for targetResult: PingResult, timeout: String, size: String) async -> String {
-        guard !targetResult.targetValue.isEmpty else { return "Invalid Target" }
+    private func shouldRestartEngine(after error: Error, currentAttemptCount: Int) -> Bool {
+        guard currentAttemptCount < maxEngineRestartAttempts else { return false }
 
-        let process = Process()
-        let pipe = Pipe()
-        process.standardOutput = pipe
-        process.standardError = pipe
-
-        let fileHandleForReading = pipe.fileHandleForReading
-
-        let timeoutMs = Int(timeout) ?? 2000
-        let packetSize = max(0, Int(size) ?? 32)
-
-        switch targetResult.targetType {
-        case .ipv6:
-            process.executableURL = URL(fileURLWithPath: "/sbin/ping6")
-            process.arguments = ["-c", "1", "-s", String(packetSize), targetResult.targetValue]
-        case .ipv4, .domain, .unknown:
-            process.executableURL = URL(fileURLWithPath: "/sbin/ping")
-            process.arguments = ["-c", "1", "-W", String(timeoutMs), "-s", String(packetSize), targetResult.targetValue]
+        if case FpingEngineError.timedOut = error {
+            return true
         }
 
-        var rawOutputString: String?
-        let swiftTimeoutNano = UInt64(max(1, timeoutMs)) * 1_000_000 + 500_000_000 // 0.5s buffer
-
-        defer {
-            try? fileHandleForReading.close()
-        }
-
-        do {
-            return try await withTimeout(nanoseconds: swiftTimeoutNano) {
-                if Task.isCancelled { // Check before running
-                    return "Cancelled"
-                }
-
-                try process.run()
-
-                async let outputData: Data? = try? fileHandleForReading.readToEnd()
-                await process.waitUntilExit()
-
-                if Task.isCancelled { // Check after waiting
-                    if process.isRunning {
-                        process.terminate()
-                        await Task.yield() // ADDED: Allow termination to propagate
-                    }
-                    return "Cancelled"
-                }
-                
-                let data = await outputData
-                rawOutputString = data.flatMap { String(data: $0, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) }
-
-                guard let finalOutput = rawOutputString, !finalOutput.isEmpty else {
-                    return process.terminationStatus == 0 ? "No output" : "Failed"
-                }
-
-                if process.terminationStatus != 0 {
-                    // Even if status != 0, output might contain time if -W (timeout for ping command) was hit
-                    if finalOutput.contains("time=") || finalOutput.contains("bytes from") {
-                        return self.parsePingOutput(finalOutput, for: targetResult.targetType)
-                    }
-                    return self.parsePingError(finalOutput)
-                }
-                return self.parsePingOutput(finalOutput, for: targetResult.targetType)
-            }
-        } catch is TimeoutError {
-            if process.isRunning {
-                process.terminate()
-                await Task.yield() // ADDED: Allow termination to propagate
-            }
-            return "Timeout"
-        } catch is CancellationError {
-            if process.isRunning {
-                process.terminate()
-                await Task.yield() // ADDED: Allow termination to propagate
-            }
-            return "Cancelled"
-        } catch {
-            // General error catch
-            if Task.isCancelled { // Check if the error was due to cancellation
-                 if process.isRunning {
-                    process.terminate()
-                    await Task.yield() // ADDED: Allow termination to propagate
-                 }
-                 return "Cancelled"
-            }
-            // If not a cancellation error, but process is still running (unlikely but possible)
-            if process.isRunning {
-                process.terminate()
-                await Task.yield() // ADDED: Allow termination to propagate
-            }
-            
-            // Try to parse output if available, otherwise return generic error
-            if let output = rawOutputString, !output.isEmpty {
-                return self.parsePingError(output)
-            }
-            return "Error"
-        }
+        return false
     }
 
-    // MARK: - Parsing Methods (Unchanged)
-    private func parsePingOutput(_ output: String, for targetType: TargetType) -> String {
-        let regexPattern: String = #"time(?:<|=)(\d+(\.\d+)?)\s*ms"#
-        do {
-            let regex = try NSRegularExpression(pattern: regexPattern, options: [])
-            if let match = regex.firstMatch(in: output, options: [], range: NSRange(location: 0, length: output.utf16.count)) {
-                if let range = Range(match.range(at: 1), in: output) {
-                    let timeValue = String(output[range]); return output.contains("time<") ? "< \(timeValue) ms" : "\(timeValue) ms"
-                }
-            }
-        } catch { /* print("Regex error: \(error)") */ }
-        if output.contains("bytes from") { return "Success (no time)" }; return "Failed"
+    @MainActor private func markEngineRestartAttempt(_ error: Error, attempt: Int) {
+        guard pingStarted, !isPaused else { return }
+
+        let message = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+        engineErrorMessage = "\(message) Restarting fping automatically (attempt \(attempt)/\(maxEngineRestartAttempts))."
+
+        for result in results where ["pinging...", "pending", "restarting engine..."].contains(result.responseTime.lowercased()) {
+            result.responseTime = "Restarting engine..."
+            result.isSuccessful = false
+            result.clearCurrentLatency()
+        }
+
+        updateTotalCounts()
     }
 
-     private func parsePingError(_ output: String) -> String {
-         let lowerOutput = output.lowercased()
-         if lowerOutput.contains("timeout") || lowerOutput.contains("request timeout") { return "Timeout" }
-         else if lowerOutput.contains("cannot resolve") || lowerOutput.contains("unknown host") || lowerOutput.contains("name or service not known") { return "Host unknown" }
-         else if lowerOutput.contains("network is unreachable") { return "Network down" }
-         else if lowerOutput.contains("no route to host") { return "No route" }
-         else if lowerOutput.contains("host unreachable") { return "Host unreachable" }
-         else if lowerOutput.contains("invalid argument") && lowerOutput.contains("ping") { return "Invalid Target" }
-         else if lowerOutput.contains("permission denied") { return "Permission denied"}
-         return "Failed" // Default to "Failed" if no specific error pattern matches
-     }
+    @MainActor private func handleEngineFailure(_ error: Error) {
+        let message = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
 
-    // MARK: - Update Counts (Unchanged)
+        pingStarted = false
+        isPaused = false
+        pingStatus = "Engine Unavailable"
+        engineErrorMessage = message
+
+        for result in results where ["pinging...", "pending"].contains(result.responseTime.lowercased()) {
+            result.responseTime = "Engine unavailable"
+            result.isSuccessful = false
+        }
+
+        updateTotalCounts()
+    }
+
     @MainActor private func updateTotalCounts() {
-        reachableCount = results.filter { $0.isSuccessful && !["pinging...", "pending", "paused", "stopped", "cleared", "cancelled"].contains($0.responseTime.lowercased()) }.count
-        failedCount = results.filter { !$0.isSuccessful && !["pinging...", "pending", "paused", "stopped", "cleared", "cancelled"].contains($0.responseTime.lowercased()) }.count
+        let inactiveStatuses = ["pinging...", "pending", "paused", "stopped", "cleared", "cancelled", "engine unavailable", "restarting engine..."]
+        reachableCount = results.filter { $0.isSuccessful && !inactiveStatuses.contains($0.responseTime.lowercased()) }.count
+        failedCount = results.filter { !$0.isSuccessful && !inactiveStatuses.contains($0.responseTime.lowercased()) }.count
     }
 }

@@ -1,7 +1,7 @@
 import SwiftUI
 
 // AppDelegate to handle application lifecycle events AND window events
-class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate { // Added NSWindowDelegate
+@MainActor class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate { // Added NSWindowDelegate
     static weak var pingManagerInstance: PingManager?
     private var windowObservation: NSKeyValueObservation? // KVO handle for new windows
 
@@ -12,7 +12,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate { // Added 
             // .initial ensures this runs for windows existing at the time of observation.
             // .new ensures it runs for newly added windows.
             print("AppDelegate: KVO detected change in application windows.")
-            self?.assignDelegateToAllWindows()
+            Task { @MainActor in
+                self?.assignDelegateToAllWindows()
+            }
         }
     }
     
@@ -32,7 +34,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate { // Added 
         DispatchQueue.main.async { // Ensure UI updates (like setting a delegate) are on the main thread
             for window in NSApp.windows {
                 // We are interested in the main "Targets Collector" window and "Ping Results" windows.
-                let isRelevantWindowType = window.identifier?.rawValue == "ip-input" || window.title.starts(with: "Ping Results")
+                let isRelevantWindowType = self.isRelevantWindow(window)
                 
                 // Only assign if it's a relevant window and the delegate is not already this instance.
                 if isRelevantWindowType && !(window.delegate is AppDelegate) {
@@ -48,9 +50,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate { // Added 
     func applicationWillTerminate(_ notification: Notification) {
         print("AppDelegate: Application will terminate. Performing final cleanup.")
         if let manager = AppDelegate.pingManagerInstance {
-            print("AppDelegate: Found PingManager instance (\(ObjectIdentifier(manager))). Calling stopPingTasks(clearResults: true).")
-            manager.stopPingTasks(clearResults: true)
-            print("AppDelegate: stopPingTasks called from applicationWillTerminate.")
+            print("AppDelegate: Found PingManager instance (\(ObjectIdentifier(manager))). Preparing synchronous shutdown.")
+            manager.prepareForAppTermination(clearResults: true)
+            print("AppDelegate: synchronous shutdown finished.")
         } else {
             print("AppDelegate: PingManager instance not found for final cleanup in applicationWillTerminate.")
         }
@@ -67,15 +69,14 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate { // Added 
         // Relevant windows are our main IP input window and any results windows.
         // We count only visible windows that are of the types we manage.
         let relevantWindows = NSApp.windows.filter { window in
-            let isRelevantType = window.identifier?.rawValue == "ip-input" || window.title.starts(with: "Ping Results")
-            return isRelevantType && window.isVisible // Consider only visible windows
+            return isRelevantWindow(window) && window.isVisible // Consider only visible windows
         }
         
         print("AppDelegate: Number of relevant visible windows: \(relevantWindows.count)")
         if relevantWindows.count == 1 && relevantWindows.first == sender {
-            print("AppDelegate: This is the last relevant window ('\(sender.title)'). Initiating app termination via NSApp.terminate(self).")
-            NSApp.terminate(self) // Tell the application to quit (triggers applicationWillTerminate).
-            return false // Prevent the window from closing by default; app termination handles it.
+            print("AppDelegate: This is the last relevant window ('\(sender.title)'). Preparing ping shutdown before normal close.")
+            AppDelegate.pingManagerInstance?.prepareForAppTermination(clearResults: true)
+            return true
         } else {
             print("AppDelegate: Window '\(sender.title)' is not the last relevant window, or other relevant windows exist. Allowing this window to close normally.")
             // This allows individual results windows to close if the main input window (or other results windows) are still open.
@@ -97,6 +98,12 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate { // Added 
         return true
     }
 
+    private func isRelevantWindow(_ window: NSWindow) -> Bool {
+        window.identifier?.rawValue == "ip-input" ||
+        window.identifier?.rawValue == "ping-results" ||
+        window.title.starts(with: "Ping Results")
+    }
+
     deinit {
         windowObservation?.invalidate() // Ensure KVO is cleaned up
     }
@@ -116,7 +123,5 @@ struct MultiPingApp: App {
                     // AppDelegate's KVO with .initial should handle setting the window delegate for this initial window.
                 }
         }
-        .windowStyle(.hiddenTitleBar)
-        .windowToolbarStyle(.unified)
     }
 }

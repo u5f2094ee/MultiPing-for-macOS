@@ -1,6 +1,6 @@
 import SwiftUI
 import AppKit
-import Foundation // Needed for ceil()
+import Foundation
 
 // Enum for View Modes (Unchanged)
 enum ResultsViewMode: String, CaseIterable, Identifiable {
@@ -12,8 +12,9 @@ enum ResultsViewMode: String, CaseIterable, Identifiable {
 struct IPInputView: View {
     @ObservedObject var manager: PingManager
     @State var timeout: String = "2000"
-    @State var interval: String = "10"
     @State var size: String = "32"
+    @State var interval: String = "3"
+    @State var dscp: String = "0"
     @State private var selectedViewMode: ResultsViewMode = .list
 
     private var placeholderText: String = """
@@ -37,10 +38,15 @@ Notes are optional. Use comma, space, or tab to separate target from note.
     }
 
     var suggestedInterval: Int {
-        guard validTargetCount > 0 else { return 1 }
-        let rawSuggestion = Double(validTargetCount) / 10.0
-        let roundedUpSuggestion = ceil(rawSuggestion)
-        return max(1, Int(roundedUpSuggestion))
+        let timeoutMs = Int(timeout) ?? 2000
+        return max(1, (timeoutMs / 1000) + 1)
+    }
+
+    var dscpMarkDescription: String {
+        guard let value = Int(dscp.trimmingCharacters(in: .whitespacesAndNewlines)), (0...63).contains(value) else {
+            return "Invalid"
+        }
+        return DSCPMark.name(for: value)
     }
     
 
@@ -49,14 +55,26 @@ Notes are optional. Use comma, space, or tab to separate target from note.
             // Settings Row
             HStack(alignment: .bottom, spacing: 15) {
                 VStack(alignment: .leading) { Text("Timeout (ms)").font(.caption); TextField("2000", text: $timeout).textFieldStyle(RoundedBorderTextFieldStyle()).frame(width: 80) }
-                VStack(alignment: .leading) { Text("Interval (s)").font(.caption); TextField("", text: $interval).textFieldStyle(RoundedBorderTextFieldStyle()).frame(width: 80) }
                 VStack(alignment: .leading) { Text("Size (bytes)").font(.caption); TextField("32", text: $size).textFieldStyle(RoundedBorderTextFieldStyle()).frame(width: 80) }
+                VStack(alignment: .leading) { Text("Interval (s)").font(.caption); TextField("", text: $interval).textFieldStyle(RoundedBorderTextFieldStyle()).frame(width: 80) }
+                VStack(alignment: .leading) {
+                    Text("DSCP (0-63)").font(.caption)
+                    HStack(spacing: 6) {
+                        TextField("0", text: $dscp)
+                            .textFieldStyle(RoundedBorderTextFieldStyle())
+                            .frame(width: 80)
+                        Text(dscpMarkDescription)
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                            .frame(width: 64, alignment: .leading)
+                    }
+                }
                 Spacer()
             }.padding(.top).padding(.horizontal)
 
-            // Interval Notice Text
-            Text("Notice:\nTo avoid inaccurate results when pinging a large number of Targets,Please set the interval (seconds) to at least one-tenth of the total Target count \n(e.g., 10s for 100 Targets, 20s for 200 Targets).")
-                .font(.footnote).fontWeight(.bold).foregroundColor(.red)
+            // Engine Notice Text
+            Text("Notice:\nMultiPing now uses a bundled fping engine for bulk ICMP probing. If the engine is unavailable, the test will stop and show repair guidance instead of falling back to legacy ping.")
+                .font(.footnote).fontWeight(.bold).foregroundColor(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
                 .padding(.horizontal).padding(.bottom, 5)
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -83,22 +101,33 @@ Notes are optional. Use comma, space, or tab to separate target from note.
 
         }
         .padding(.top).frame(minWidth: 500, minHeight: 380)
-        .toolbar {
-            ToolbarItem(placement: .navigation) {
-                Text("Targets Collector").font(.headline).padding(.leading, 5)
+        .onChange(of: validTargetCount) { _ in interval = String(suggestedInterval) }
+        .onChange(of: timeout) { _ in
+            if validTargetCount > 0 {
+                interval = String(suggestedInterval)
             }
         }
-        .onChange(of: validTargetCount) { _ in interval = String(suggestedInterval) }
         .onAppear { interval = String(suggestedInterval) }
     }
 
     func validateSettings() {
-        if Int(timeout) == nil { timeout = "2000" }
-        if Int(interval) == nil || (Int(interval) ?? 1) < 1 { interval = "1" }
-        if Int(size) == nil { size = "32" }
-        if let timeoutValue = Int(timeout), let intervalValue = Int(interval) {
-            if timeoutValue > intervalValue * 1000 { timeout = String(intervalValue * 1000); }
+        let timeoutValue = max(1, Int(timeout) ?? 2000)
+        let sizeValue = max(0, Int(size) ?? 32)
+        let minimumInterval = max(1, (timeoutValue / 1000) + 1)
+        let intervalValue = max(minimumInterval, Int(interval) ?? minimumInterval)
+        let dscpValue = min(63, max(0, Int(dscp) ?? 0))
+
+        timeout = String(timeoutValue)
+        size = String(sizeValue)
+        interval = String(intervalValue)
+        dscp = String(dscpValue)
+    }
+
+    func dscpDescription() -> String {
+        guard let dscpValue = Int(dscp), dscpValue > 0 else {
+            return "Off"
         }
+        return "\(dscpValue)"
     }
     
     private func identifyTargetType(_ targetString: String) -> TargetType {
@@ -190,22 +219,22 @@ Notes are optional. Use comma, space, or tab to separate target from note.
                                               successCount: 0, failureCount: 0,
                                               failureRate: 0.0, isSuccessful: false))
         }
-        manager.startPingTasks(timeout: self.timeout, interval: self.interval, size: self.size)
+        manager.startPingTasks(timeout: self.timeout, interval: self.interval, size: self.size, dscp: self.dscp)
         openResultsWindow(mode: selectedViewMode)
         inputWindow?.close() // Close the input window after starting pings
     }
 
     func openResultsWindow(mode: ResultsViewMode) {
-        let rootView: AnyView
         let windowTitle: String
         switch mode {
-        case .list: rootView = AnyView(PingResultsView(manager: manager, timeout: timeout, interval: interval, size: size)); windowTitle = "Ping Results (List)"
-        case .grid: rootView = AnyView(GridPingResultsView(manager: manager, timeout: timeout, interval: interval, size: size)); windowTitle = "Ping Results (Grid)"
+        case .list: windowTitle = "Ping Results"
+        case .grid: windowTitle = "Ping Results"
         }
-        let newWindow = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 600, height: 450), styleMask: [.titled, .closable, .resizable, .miniaturizable, .unifiedTitleAndToolbar], backing: .buffered, defer: false)
+        let newWindow = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 780, height: 520), styleMask: [.titled, .closable, .resizable, .miniaturizable, .unifiedTitleAndToolbar], backing: .buffered, defer: false)
         newWindow.center(); newWindow.setFrameAutosaveName("Ping Results Window - \(mode.rawValue)");
         newWindow.title = windowTitle
-        newWindow.contentView = NSHostingView(rootView: rootView
+        newWindow.identifier = NSUserInterfaceItemIdentifier("ping-results")
+        newWindow.contentView = NSHostingView(rootView: PingResultsContainerView(manager: manager, timeout: timeout, interval: interval, size: size, dscp: dscpDescription(), initialMode: mode)
             .onDisappear { // Add onDisappear to the root view of the results window
                 print("Results window (\(windowTitle)) disappearing. Stopping pings for this session (if active).")
                 // Only stop if pings were actually running for this session.

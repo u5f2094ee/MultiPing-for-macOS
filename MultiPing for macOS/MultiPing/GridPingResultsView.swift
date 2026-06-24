@@ -8,6 +8,9 @@ struct GridPingResultsView: View {
     var timeout: String
     var interval: String
     var size: String
+    var dscp: String
+    @Binding var viewMode: ResultsViewMode
+    @Binding var filterText: String
 
     // MARK: - Sorting Enum (Unchanged)
     enum GridSortCriteria: String, CaseIterable, Identifiable {
@@ -30,12 +33,12 @@ struct GridPingResultsView: View {
 
     // MARK: - Computed Properties
     private var gridColumns: [GridItem] {
-        [GridItem(.adaptive(minimum: 150 * gridScale), spacing: cellSpacing)]
+        [GridItem(.adaptive(minimum: 170 * gridScale), spacing: cellSpacing)]
     }
 
     var sortedGridResults: [PingResult] { // Unchanged
-        guard let sortColumn = gridSortColumn else { return manager.results }
-        let resultsToSort = manager.results
+        let resultsToSort = filter(results: manager.results, by: filterText)
+        guard let sortColumn = gridSortColumn else { return resultsToSort }
         return resultsToSort.sorted { result1, result2 in
             let comparisonResult: Bool
             switch sortColumn {
@@ -50,97 +53,145 @@ struct GridPingResultsView: View {
         }
     }
 
+    private var dscpStatusValue: String {
+        guard let dscpValue = Int(dscp), dscpValue > 0 else { return "Off" }
+        return dscp
+    }
+
     // MARK: - Body
     var body: some View {
         VStack(spacing: 0) {
+            ResultsFilterBar(filterText: $filterText, shownCount: sortedGridResults.count, totalCount: manager.results.count)
+
             ScrollView {
-                LazyVGrid(columns: gridColumns, alignment: .leading, spacing: cellSpacing) {
-                    ForEach(sortedGridResults) { result in
-                        GridCellView(result: result, scale: gridScale)
+                if manager.results.isEmpty {
+                    Text("No targets to display.")
+                        .foregroundColor(.gray)
+                        .frame(maxWidth: .infinity, minHeight: 220)
+                } else if sortedGridResults.isEmpty {
+                    Text("No targets match the current filter.")
+                        .foregroundColor(.gray)
+                        .frame(maxWidth: .infinity, minHeight: 220)
+                } else {
+                    LazyVGrid(columns: gridColumns, alignment: .leading, spacing: cellSpacing) {
+                        ForEach(sortedGridResults) { result in
+                            GridCellView(result: result, scale: gridScale)
+                        }
                     }
+                    .padding(cellSpacing)
                 }
-                .padding(cellSpacing)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
+
+            if let engineError = manager.engineErrorMessage {
+                Text(engineError)
+                    .font(.caption)
+                    .foregroundColor(.red)
+                    .lineLimit(2)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 4)
+                    .background(Color.red.opacity(0.08))
+            }
 
             // Status Bar Area (Unchanged)
             HStack(spacing: 15) {
                 StatusTextView(label: "Timeout:", value: "\(timeout) ms")
                 StatusTextView(label: "Interval:", value: "\(interval) s")
                 StatusTextView(label: "Size:", value: "\(size) B")
+                StatusTextView(label: "DSCP:", value: dscpStatusValue)
                 StatusTextView(label: "Status:", value: manager.pingStatus, color: .blue, weight: .bold)
                 Spacer()
-                StatusTextView(label: "Reachable:", value: "\(manager.reachableCount)", color: .green, weight: .bold)
-                StatusTextView(label: "Failed:", value: "\(manager.failedCount)", color: .red, weight: .bold)
+                StatusTextView(label: "Reachable:", value: "\(manager.reachableCount)", color: ResultStatusPalette.green, weight: .bold)
+                StatusTextView(label: "Failed:", value: "\(manager.failedCount)", color: ResultStatusPalette.red, weight: .bold)
             }
             .font(.callout).padding(.horizontal, 12).padding(.vertical, 5).background(.bar)
         }
         .toolbar {
             ToolbarItemGroup(placement: .primaryAction) {
-                 HStack(spacing: 5) {
-                    let buttonPadding: CGFloat = 7; let iconSize: CGFloat = 18
+                let isEffectivelyRunning = manager.pingStatus == "Pinging..." || manager.pingStatus == "Paused"
 
-                    // --- Start/Stop & Clear Button (UPDATED LOGIC) ---
-                    // Determine if the process is effectively running (pinging or paused)
-                    let isEffectivelyRunning = manager.pingStatus == "Pinging..." || manager.pingStatus == "Paused"
-                    Button {
-                        if isEffectivelyRunning {
-                            // If running or paused, the action is Stop & Clear
-                            manager.stopPingTasks(clearResults: true)
-                        } else {
-                            // If stopped, completed, or cleared, the action is Start Ping
-                            manager.startPingTasks(timeout: timeout, interval: interval, size: size)
-                        }
-                    } label: {
-                        // Set label and icon based on the effective running state
-                        Label(isEffectivelyRunning ? "Stop & Clear" : "Start Ping",
-                              systemImage: isEffectivelyRunning ? "stop.circle.fill" : "play.circle.fill")
+                Button {
+                    if isEffectivelyRunning {
+                        manager.stopPingTasks(clearResults: true)
+                    } else {
+                        manager.startPingTasks(timeout: timeout, interval: interval, size: size, dscp: dscp)
                     }
-                    // Set tint based on the effective running state
-                    .tint(isEffectivelyRunning ? .red : .green)
-                    .padding(buttonPadding).contentShape(Rectangle())
-                    // --- End Start/Stop & Clear Button Update ---
+                } label: {
+                    Label(isEffectivelyRunning ? "Stop & Clear" : "Start Ping",
+                          systemImage: isEffectivelyRunning ? "stop.circle.fill" : "play.circle.fill")
+                }
+                .help(isEffectivelyRunning ? "Stop & Clear" : "Start Ping")
+                .tint(isEffectivelyRunning ? ResultStatusPalette.red : ResultStatusPalette.green)
 
-                    // --- Pause/Resume Button (UPDATED .disabled logic for consistency) ---
-                    Button { manager.togglePause() } label: { Label(manager.isPaused ? "Resume" : "Pause", systemImage: manager.isPaused ? "play.circle.fill" : "pause.circle.fill") }
-                    .tint(.orange)
-                    // Disable if not pinging OR paused (i.e., disable if stopped, completed, cleared)
-                    .disabled(!(manager.pingStatus == "Pinging..." || manager.pingStatus == "Paused"))
-                    .padding(buttonPadding).contentShape(Rectangle())
-                    // --- End Pause/Resume Button Update ---
+                Button {
+                    manager.togglePause()
+                } label: {
+                    Label(manager.isPaused ? "Resume" : "Pause",
+                          systemImage: manager.isPaused ? "play.circle.fill" : "pause.circle.fill")
+                }
+                .help(manager.isPaused ? "Resume" : "Pause")
+                .tint(ResultStatusPalette.orange)
+                .disabled(!(manager.pingStatus == "Pinging..." || manager.pingStatus == "Paused"))
 
+                Button {
+                    viewMode = .list
+                } label: {
+                    Label("List Layout", systemImage: "list.bullet")
+                }
+                .help("Switch to List Layout")
 
-                    Spacer()
-                    // Sort Menu (Unchanged)
-                    Menu {
-                         Button("Default Order") { gridSortColumn = nil }; Divider()
-                        ForEach(GridSortCriteria.allCases) { criteria in
-                             Button(criteria.rawValue) {
-                                 if gridSortColumn == criteria { gridSortAscending.toggle() } else { gridSortColumn = criteria
-                                     switch criteria { case .targetValue: gridSortAscending = true; case .successCount, .failureCount: gridSortAscending = false }
-                                 }
-                             }
-                         }
-                    } label: { HStack { Image(systemName: "arrow.up.arrow.down.circle")
-                            if let currentSort = gridSortColumn { Text("Sort: \(currentSort.rawValue)"); Image(systemName: gridSortAscending ? "arrow.up" : "arrow.down").font(.caption) } else { Text("Sort") }
+                Menu {
+                    ForEach(PingResultsExportType.allCases) { type in
+                        Button(type.menuTitle) {
+                            PingResultsExporter.export(sortedGridResults, as: type)
                         }
-                    }.menuStyle(.borderlessButton).padding(buttonPadding).contentShape(Rectangle())
+                    }
+                } label: {
+                    Label("Export", systemImage: "square.and.arrow.down")
+                }
+                .help("Export Ping Results")
+                .disabled(manager.results.isEmpty)
 
-                    // Scale Buttons (Unchanged)
-                    Button { gridScale = max(minScale, gridScale - scaleStep) } label: { Image(systemName: "minus.magnifyingglass").font(.system(size: iconSize)) }
-                    .buttonStyle(.plain).disabled(gridScale <= minScale).padding(buttonPadding).contentShape(Rectangle())
-                    Button { gridScale = min(maxScale, gridScale + scaleStep) } label: { Image(systemName: "plus.magnifyingglass").font(.system(size: iconSize)) }
-                    .buttonStyle(.plain).disabled(gridScale >= maxScale).padding(buttonPadding).contentShape(Rectangle())
-                 }
+                Menu {
+                    Button("Default Order") { gridSortColumn = nil }
+                    Divider()
+                    ForEach(GridSortCriteria.allCases) { criteria in
+                        Button(criteria.rawValue) {
+                            if gridSortColumn == criteria {
+                                gridSortAscending.toggle()
+                            } else {
+                                gridSortColumn = criteria
+                                switch criteria {
+                                case .targetValue: gridSortAscending = true
+                                case .successCount, .failureCount: gridSortAscending = false
+                                }
+                            }
+                        }
+                    }
+                } label: {
+                    Label("Sort", systemImage: "arrow.up.arrow.down.circle")
+                }
+                .help("Sort Grid Results")
+
+                Button {
+                    gridScale = max(minScale, gridScale - scaleStep)
+                } label: {
+                    Label("Zoom Out", systemImage: "minus.magnifyingglass")
+                }
+                .help("Zoom Out")
+                .disabled(gridScale <= minScale)
+
+                Button {
+                    gridScale = min(maxScale, gridScale + scaleStep)
+                } label: {
+                    Label("Zoom In", systemImage: "plus.magnifyingglass")
+                }
+                .help("Zoom In")
+                .disabled(gridScale >= maxScale)
             }
         }
-        // Stop pinging (without clearing) if the view disappears
-        .onDisappear {
-            // Only stop if it was actively pinging or paused (not already stopped/completed)
-            if manager.pingStatus == "Pinging..." || manager.pingStatus == "Paused" {
-                manager.stopPingTasks(clearResults: false)
-            }
-        }
+        .labelStyle(.iconOnly)
     }
 
     // MARK: - Nested GridCellView (UPDATED for notes)
@@ -152,7 +203,7 @@ struct GridPingResultsView: View {
         private let baseNoteFontSize: CGFloat = 10 // New
         private let baseTimeFontSize: CGFloat = 10
         private let baseCountFontSize: CGFloat = 12
-        private var minCellHeight: CGFloat { (result.note == nil ? 75 : 90) * scale } // Adjusted for note
+        private var cellHeight: CGFloat { 108 * scale }
 
         internal init(result: PingResult, scale: CGFloat) {
             self.result = result
@@ -160,13 +211,13 @@ struct GridPingResultsView: View {
         }
 
         private var backgroundColor: Color {
-            switch result.responseTime.lowercased() {
-            case "pending", "pinging...", "paused", "stopped", "cleared", "cancelled": return Color.gray.opacity(0.3)
-            default: return result.isSuccessful ? Color.green.opacity(0.3) : Color.red.opacity(0.3)
+            if ResultStatusPalette.isInactive(result.responseTime) {
+                return ResultStatusPalette.orange.opacity(0.14)
             }
+            return result.isSuccessful ? ResultStatusPalette.green.opacity(0.14) : ResultStatusPalette.red.opacity(0.14)
         }
-        private var successColor: Color = .green
-        private var failureColor: Color = .red
+        private var successColor: Color { ResultStatusPalette.green }
+        private var failureColor: Color { ResultStatusPalette.red }
 
         private var targetDisplayNameFontSize: CGFloat {
             switch result.targetType {
@@ -179,22 +230,23 @@ struct GridPingResultsView: View {
             VStack(alignment: .leading, spacing: 4 * scale) {
                 Text(result.displayName)
                     .font(.system(size: targetDisplayNameFontSize, weight: .medium, design: .monospaced))
-                    .lineLimit(nil).fixedSize(horizontal: false, vertical: true)
+                    .foregroundColor(ResultStatusPalette.swiftColor(for: result))
+                    .lineLimit(2)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(.bottom, (result.note != nil ? 0 : 2) * scale) // Adjust padding if note exists
 
                 if let note = result.note, !note.isEmpty { // Display note if present [cite: 5]
                     Text(note)
                         .font(.system(size: baseNoteFontSize * scale, design: .monospaced))
-                        .foregroundColor(.secondary)
-                        .lineLimit(nil).fixedSize(horizontal: false, vertical: true)
+                        .foregroundColor(ResultStatusPalette.swiftColor(for: result).opacity(0.82))
+                        .lineLimit(1)
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .padding(.bottom, 2 * scale)
                 }
 
                 Text(result.responseTime)
                     .font(.system(size: baseTimeFontSize * scale, design: .monospaced))
-                    .foregroundColor(result.isSuccessful ? .primary.opacity(0.8) : .secondary)
+                    .foregroundColor(ResultStatusPalette.swiftColor(for: result))
                     .lineLimit(1).truncationMode(.tail)
                     .frame(maxWidth: .infinity, alignment: .leading)
                 Spacer()
@@ -207,7 +259,7 @@ struct GridPingResultsView: View {
                 }
             }
             .padding(8 * scale).background(backgroundColor).cornerRadius(6 * scale)
-            .frame(minHeight: minCellHeight).clipShape(RoundedRectangle(cornerRadius: 6 * scale))
+            .frame(height: cellHeight, alignment: .top).clipShape(RoundedRectangle(cornerRadius: 6 * scale))
         }
     }
 

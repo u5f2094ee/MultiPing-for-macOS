@@ -252,18 +252,18 @@
 				CODE_SIGN_ENTITLEMENTS = MultiPing/MultiPing.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
-				CURRENT_PROJECT_VERSION = 20250602;
+				CURRENT_PROJECT_VERSION = 20260521;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_CFBundleDisplayName = "Multiping for macOS";
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.utilities";
-				INFOPLIST_KEY_NSHumanReadableCopyright = "Developed by Zhang Zheng with the assistance of Gemini 2.5 Pro\n\nUpdate logs: \nhttps://github.com/u5f2094ee/MultiPing-for-macOS/blob/main/Update%20log.md\n\nSpecial thanks:\nSpecial thanks to Gemini 2.5 Pro, GPT-o3, and GPT-o4-mini-high for their invaluable support and contributions to this project.\n\nGithub:\nhttps://github.com/u5f2094ee/MultiPing-for-macOS";
+				INFOPLIST_KEY_NSHumanReadableCopyright = "Developed by Zhang Zheng, Gemini, and Codex\n\nUpdate logs: \nhttps://github.com/u5f2094ee/MultiPing-for-macOS/blob/main/Update%20log.md\n\nSpecial thanks:\nSpecial thanks to Gemini and Codex for their invaluable support and contributions to this project.\n\nGithub:\nhttps://github.com/u5f2094ee/MultiPing-for-macOS";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
 				MACOSX_DEPLOYMENT_TARGET = 13.5;
-				MARKETING_VERSION = 1.3;
+				MARKETING_VERSION = 1.4;
 				PRODUCT_BUNDLE_IDENTIFIER = ZhangZheng.MultiPing;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				REGISTER_APP_GROUPS = YES;
@@ -281,18 +281,18 @@
 				CODE_SIGN_ENTITLEMENTS = MultiPing/MultiPing.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
-				CURRENT_PROJECT_VERSION = 20250602;
+				CURRENT_PROJECT_VERSION = 20260521;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_CFBundleDisplayName = "Multiping for macOS";
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.utilities";
-				INFOPLIST_KEY_NSHumanReadableCopyright = "Developed by Zhang Zheng with the assistance of Gemini 2.5 Pro\n\nUpdate logs: \nhttps://github.com/u5f2094ee/MultiPing-for-macOS/blob/main/Update%20log.md\n\nSpecial thanks:\nSpecial thanks to Gemini 2.5 Pro, GPT-o3, and GPT-o4-mini-high for their invaluable support and contributions to this project.\n\nGithub:\nhttps://github.com/u5f2094ee/MultiPing-for-macOS";
+				INFOPLIST_KEY_NSHumanReadableCopyright = "Developed by Zhang Zheng, Gemini, and Codex\n\nUpdate logs: \nhttps://github.com/u5f2094ee/MultiPing-for-macOS/blob/main/Update%20log.md\n\nSpecial thanks:\nSpecial thanks to Gemini and Codex for their invaluable support and contributions to this project.\n\nGithub:\nhttps://github.com/u5f2094ee/MultiPing-for-macOS";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
 				MACOSX_DEPLOYMENT_TARGET = 13.5;
-				MARKETING_VERSION = 1.3;
+				MARKETING_VERSION = 1.4;
 				PRODUCT_BUNDLE_IDENTIFIER = ZhangZheng.MultiPing;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				REGISTER_APP_GROUPS = YES;
